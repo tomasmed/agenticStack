@@ -1,0 +1,5 @@
+python-dotenv
+crewai>=0.100.0
+crewai-tools
+aider-chat>=0.76.0
+anthropic

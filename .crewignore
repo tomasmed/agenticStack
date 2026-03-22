@@ -1,0 +1,35 @@
+# ── Agent infrastructure ──────────────────────────────────────
+flows/
+crews/
+tools/
+manifests/
+context_sidecars/
+workspace/
+
+# ── Virtual environments ──────────────────────────────────────
+.venv/
+.venv-aider/
+*/.venv/
+*/.venv-aider/
+*/.venv/*
+*/.venv-aider/*
+
+# ── Generated outputs ─────────────────────────────────────────
+output/
+dist/
+.next/
+build/
+node_modules/
+*/node_modules/
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*/__pycache__/
+*.pyc
+
+# ── Config ────────────────────────────────────────────────────
+.env
+.env.*
+*.config.js
+*.config.ts
+next.config.*
