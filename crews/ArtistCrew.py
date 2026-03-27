@@ -13,6 +13,7 @@ The only technical defaults permitted:
   svg size:   768x768   (vtracer input size)
 
 Idempotent: skips assets whose final output already exists.
+Output format determined by file extension in path — no type/format fields needed.
 """
 
 import base64
@@ -23,19 +24,23 @@ import time
 from pathlib import Path
 
 import requests
-from crewai.tools import BaseTool
 
 
 # ─────────────────────────────────────────────────────────────
-# Config
+# Config — read at call time so .env override takes effect
 # ─────────────────────────────────────────────────────────────
 
-SD_HOST       = os.getenv("SD_HOST", "http://localhost:7860")
-SD_URL        = f"{SD_HOST}/sdapi/v1/txt2img"
-SD_CHECKPOINT = os.getenv("SD_CHECKPOINT")
-TIMEOUT       = 300
+def _sd_host() -> str:
+    return os.getenv("SD_HOST", "http://localhost:7860").strip()
 
-WEIGHT_STEPS  = {"light": 22, "balanced": 28, "detailed": 35}
+def _sd_url() -> str:
+    return f"{_sd_host()}/sdapi/v1/txt2img"
+
+def _sd_checkpoint() -> str | None:
+    return os.getenv("SD_CHECKPOINT")
+
+TIMEOUT      = 300
+WEIGHT_STEPS = {"light": 22, "balanced": 28, "detailed": 35}
 
 REQUIRED_GENERATION_FIELDS = [
     "subject", "style", "palette", "negative", "sd_weight"
@@ -43,49 +48,64 @@ REQUIRED_GENERATION_FIELDS = [
 
 
 # ─────────────────────────────────────────────────────────────
-# Schema helpers — ported directly from Artist.py
+# Schema normalisation
+# Single source of truth: file extension in path
 # ─────────────────────────────────────────────────────────────
 
 def _get_output_block(asset: dict) -> dict:
-    """Normalise to nested output block. Supports flat and nested schemas."""
+    """
+    Normalise any manifest schema variant to a consistent output block.
+    Supports: nested output{}, flat output_path, top-level path.
+    Format/type derived from file extension — no type field needed.
+    """
     if "output" in asset:
-        return asset["output"]
-    path = asset.get("output_path", "")
+        out  = asset["output"]
+        path = out.get("path", "")
+        dims = out.get("dimensions")
+    else:
+        # flat schema — path at top level or output_path
+        path = asset.get("path") or asset.get("output_path", "")
+        dims = asset.get("dimensions")
+
+    ext    = Path(path).suffix.lstrip(".").lower() or "png"
+    is_svg = ext == "svg"
+
     return {
-        "type":       asset.get("type", "raster"),
         "path":       path,
-        "dimensions": asset.get("dimensions"),
-        "format":     Path(path).suffix.lstrip(".") or "png",
+        "ext":        ext,
+        "is_svg":     is_svg,
+        "dimensions": dims,
     }
 
 
-def _parse_dimensions(dim_str) -> tuple[int, int]:
-    """Parse WxH string, clamp to SD-safe multiples of 8."""
-    if dim_str is None:
-        return 768, 768
+def _parse_dimensions(out: dict) -> tuple[int, int]:
+    """Parse WxH from output block. Returns safe SD defaults if missing."""
+    dim_str = out.get("dimensions")
+    if not dim_str:
+        return (768, 768) if out.get("is_svg") else (1024, 576)
     nums = re.findall(r"\d+", str(dim_str))
     if len(nums) < 2:
-        raise ValueError(
-            f"Cannot parse dimensions '{dim_str}'. Expected '1440x400'."
-        )
+        return 1024, 576
     w = min(max(round(int(nums[0]) / 8) * 8, 512), 1536)
     h = min(max(round(int(nums[1]) / 8) * 8, 512), 1536)
     return w, h
 
 
+# ─────────────────────────────────────────────────────────────
+# Payload builder
+# ─────────────────────────────────────────────────────────────
+
 def _build_payload(asset: dict) -> tuple[dict, str]:
     """Build Forge API payload from manifest fields. Fails loudly on missing."""
     asset_id = asset.get("id", "unknown")
-    gen = asset.get("generation")
+    gen      = asset.get("generation")
 
     if not gen:
         raise KeyError(f"Asset '{asset_id}' has no generation block. Run ArtDirector first.")
 
     for field in REQUIRED_GENERATION_FIELDS:
         if field not in gen:
-            raise KeyError(
-                f"Asset '{asset_id}' generation block missing '{field}'."
-            )
+            raise KeyError(f"Asset '{asset_id}' generation block missing '{field}'.")
 
     if gen["sd_weight"] not in WEIGHT_STEPS:
         raise ValueError(
@@ -93,7 +113,8 @@ def _build_payload(asset: dict) -> tuple[dict, str]:
             f"Must be one of: {list(WEIGHT_STEPS.keys())}"
         )
 
-    out = _get_output_block(asset)
+    out       = _get_output_block(asset)
+    width, height = _parse_dimensions(out)
 
     prompt_parts = [
         gen["subject"],
@@ -106,7 +127,6 @@ def _build_payload(asset: dict) -> tuple[dict, str]:
     negative  = gen["negative"]
     steps     = gen.get("steps") or WEIGHT_STEPS[gen["sd_weight"]]
     cfg_scale = gen.get("cfg_scale") or 7.0
-    width, height = _parse_dimensions(out.get("dimensions"))
 
     payload = {
         "prompt":          positive,
@@ -122,26 +142,29 @@ def _build_payload(asset: dict) -> tuple[dict, str]:
         "save_images":     False,
     }
 
-    if SD_CHECKPOINT:
-        payload["override_settings"] = {"sd_model_checkpoint": SD_CHECKPOINT}
+    checkpoint = _sd_checkpoint()
+    if checkpoint:
+        payload["override_settings"] = {"sd_model_checkpoint": checkpoint}
         payload["override_settings_restore_afterwards"] = True
 
     return payload, positive
 
 
 # ─────────────────────────────────────────────────────────────
-# Forge API call
+# Forge API
 # ─────────────────────────────────────────────────────────────
 
 def _call_forge(payload: dict) -> bytes:
+    host = _sd_host()
+    url  = _sd_url()
     try:
-        resp = requests.post(SD_URL, json=payload, timeout=TIMEOUT)
+        resp = requests.post(url, json=payload, timeout=TIMEOUT)
         resp.raise_for_status()
     except requests.exceptions.Timeout:
         raise RuntimeError(f"Forge timed out after {TIMEOUT}s.")
     except requests.exceptions.ConnectionError:
         raise RuntimeError(
-            f"Cannot connect to Forge at {SD_HOST}. "
+            f"Cannot connect to Forge at {host}. "
             "Check SD_HOST in .env and --api --listen on Forge."
         )
     data = resp.json()
@@ -176,37 +199,28 @@ def _raster_to_svg(png_path: Path, svg_path: Path):
 # Asset processing
 # ─────────────────────────────────────────────────────────────
 
-def _resolve_paths(asset: dict, project_root: Path) -> tuple[Path, Path, str]:
-    out      = _get_output_block(asset)
-    out_type = out.get("type", "raster")
-    asset_id = asset.get("id", "unknown")
-    out_path = project_root / out.get("path", f"frontend/public/images/{asset_id}.png")
-
-    if out_type == "svg":
-        png_path   = out_path.with_suffix(".tmp.png")
-        final_path = out_path.with_suffix(".svg")
-    else:
-        png_path   = out_path
-        final_path = out_path
-
-    return png_path, final_path, out_type
-
-
 def _process_asset(asset: dict, i: int, total: int, project_root: Path) -> str | None:
     """Returns None on success, error string on failure."""
     asset_id = asset.get("id", f"asset_{i}")
     ticket   = asset.get("referenced_in_ticket", "unknown")
-    png_path, final_path, out_type = _resolve_paths(asset, project_root)
+    out      = _get_output_block(asset)
+
+    if not out["path"]:
+        return f"no path defined for asset '{asset_id}'"
+
+    final_path = project_root / out["path"]
+    png_path   = final_path.with_suffix(".tmp.png") if out["is_svg"] else final_path
 
     print(f"  [{i}/{total}] {asset_id}  (ticket: {ticket})")
+    print(f"    Output: {final_path}")
 
     # idempotent — skip if already done
     if final_path.exists():
         print(f"    ↷ Already exists, skipping\n")
         return None
 
-    # PNG exists for SVG asset — vtracer only
-    if out_type == "svg" and png_path.exists():
+    # PNG exists for SVG — vtracer only
+    if out["is_svg"] and png_path.exists():
         print(f"    PNG exists — running vtracer only...")
         try:
             _raster_to_svg(png_path, final_path)
@@ -215,18 +229,19 @@ def _process_asset(asset: dict, i: int, total: int, project_root: Path) -> str |
         except RuntimeError as e:
             return str(e)
 
-    # generate from scratch
+    # generate from scratch — create output dir here
     final_path.parent.mkdir(parents=True, exist_ok=True)
+
     try:
         payload, prompt = _build_payload(asset)
-        print(f"    Prompt:  {prompt[:100]}...")
+        print(f"    Prompt:  {prompt[:120]}...")
         print(f"    Size:    {payload['width']}x{payload['height']}  "
               f"Steps: {payload['steps']}  CFG: {payload['cfg_scale']}")
-        print(f"    Calling Forge...")
+        print(f"    Calling Forge at {_sd_host()}...")
 
         png_bytes = _call_forge(payload)
 
-        if out_type == "svg":
+        if out["is_svg"]:
             png_path.write_bytes(png_bytes)
             _raster_to_svg(png_path, final_path)
         else:
@@ -243,16 +258,14 @@ def _process_asset(asset: dict, i: int, total: int, project_root: Path) -> str |
 
 
 # ─────────────────────────────────────────────────────────────
-# Public interface — called directly from flow, not as a Crew
+# Public interface
 # ─────────────────────────────────────────────────────────────
 
 def run_artist(manifest_path: str, project_root: str = "."):
     """
-    Process all assets in an approved manifest.
-
-    Note: Artist is called directly from the flow — not as a CrewAI Crew.
-    It is pure tooling: no LLM, no agent reasoning, just Forge API calls.
-    The manifest drives everything.
+    Process all assets in a manifest.
+    Soft-returns if status is not 'approved' — flow manages the gate via
+    pipeline_state.json, not via exceptions here.
 
     Args:
         manifest_path: path to asset_manifest.json
@@ -260,13 +273,12 @@ def run_artist(manifest_path: str, project_root: str = "."):
     """
     manifest = json.loads(Path(manifest_path).read_text())
     root     = Path(project_root)
+    status   = manifest.get("status", "draft")
 
-    if manifest.get("status") != "approved":
-        raise ValueError(
-            f"Manifest status is '{manifest.get('status')}', not 'approved'.\n"
-            "Set \"status\": \"approved\" in asset_manifest.json to proceed.\n"
-            "This is a human gate — review the generation blocks first."
-        )
+    if status != "approved":
+        print(f"[Artist] Manifest status is '{status}' — not approved, skipping.")
+        print(f"[Artist] Set \"status\": \"approved\" in {manifest_path} to generate assets.")
+        return
 
     assets = manifest.get("assets", [])
     if not assets:
@@ -276,8 +288,8 @@ def run_artist(manifest_path: str, project_root: str = "."):
     total  = len(assets)
     failed = {}
 
-    print(f"[Artist] SD host:    {SD_HOST}")
-    print(f"[Artist] Checkpoint: {SD_CHECKPOINT or 'currently loaded in Forge'}")
+    print(f"[Artist] SD host:    {_sd_host()}")
+    print(f"[Artist] Checkpoint: {_sd_checkpoint() or 'currently loaded in Forge'}")
     print(f"[Artist] Assets:     {total}\n")
 
     for i, asset in enumerate(assets, 1):
@@ -296,6 +308,6 @@ def run_artist(manifest_path: str, project_root: str = "."):
         for asset_id, reason in failed.items():
             print(f"  ✗ {asset_id}: {reason}")
         print(f"\n[Artist] Fix failed assets and re-run.")
-        print(f"[Artist] Successful assets are saved and will be skipped on re-run.")
+        print(f"[Artist] Successful assets will be skipped on re-run.")
     else:
         print(f"[Artist] All assets generated successfully.")

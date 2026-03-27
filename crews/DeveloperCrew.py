@@ -4,11 +4,15 @@ Developer
 Pure orchestration — no LLM wrapper.
 Parses tickets from TeamLead, runs one aider call per ticket, one commit each.
 
-Aider runs in an isolated venv (.venv-aider) to avoid dependency conflicts
-with crewai. Falls back to PATH aider if isolated venv not found.
+Aider runs as a uv-managed tool or isolated venv to avoid dependency conflicts.
 
-Stops on first failure — later tickets may depend on earlier ones.
+Stops on first failure — later tickets depend on earlier ones.
 Git identity switched to agent for commits, restored to human in finally.
+All git operations run in the target project repo (Repo B).
+
+Resume behaviour: on retry, tickets whose commit message already exists in
+commits made AFTER the branch diverged from main are skipped. This scopes
+the check to the current feature branch only, not the full repo history.
 """
 
 import os
@@ -21,16 +25,14 @@ from dotenv import dotenv_values
 
 
 # ─────────────────────────────────────────────────────────────
-# Aider path resolution — Updated for UV Tools
+# Aider path resolution
 # ─────────────────────────────────────────────────────────────
 
 def _get_aider_path() -> str:
-    # 1. Check if 'aider' is available in the PATH (where uv tool installs it)
     uv_managed_aider = shutil.which("aider")
     if uv_managed_aider:
         return uv_managed_aider
 
-    # 2. Fallback to a .venv pattern
     isolated_venv = Path(".venv-aider/bin/aider")
     if isolated_venv.exists():
         return str(isolated_venv)
@@ -46,7 +48,12 @@ def _get_aider_path() -> str:
 # ─────────────────────────────────────────────────────────────
 
 def _parse_tickets(tickets_path: str) -> list[dict]:
-    content = Path(tickets_path).read_text()
+    try:
+        content = Path(tickets_path).read_text()
+    except Exception as e:
+        print(f"[Developer] ERROR reading tickets file: {e}")
+        return []
+
     tickets = []
     blocks  = re.split(r'\*\*ticket:\*\*', content)[1:]
 
@@ -69,6 +76,43 @@ def _parse_tickets(tickets_path: str) -> list[dict]:
         })
 
     return tickets
+
+
+# ─────────────────────────────────────────────────────────────
+# Resume helpers — scoped to current branch only
+# ─────────────────────────────────────────────────────────────
+
+def _committed_tickets_on_branch(cwd: str, env: dict) -> set[str]:
+    """
+    Return set of ticket numbers already committed on the current branch,
+    scoped to commits that diverged from main. This prevents commits from
+    previous feature runs polluting the skip list.
+    """
+    try:
+        # find the merge base — where this branch diverged from main
+        merge_base = subprocess.run(
+            ["git", "merge-base", "HEAD", "main"],
+            cwd=cwd, capture_output=True, text=True, env=env
+        )
+        if merge_base.returncode != 0:
+            # main may not exist yet — fall back to full log
+            ref = "HEAD"
+        else:
+            ref = f"{merge_base.stdout.strip()}..HEAD"
+
+        result = subprocess.run(
+            ["git", "log", "--oneline", ref],
+            cwd=cwd, capture_output=True, text=True, env=env
+        )
+        committed = set()
+        for line in result.stdout.splitlines():
+            match = re.search(r'\b(T-\d+):', line)
+            if match:
+                committed.add(match.group(1))
+        return committed
+    except Exception as e:
+        print(f"[Developer] WARN — could not read git log: {e}. No tickets will be skipped.")
+        return set()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -104,41 +148,46 @@ def _run_aider(ticket: dict, project_context: str, env: dict, cwd: str) -> bool:
 
     ollama_host = env.get("OLLAMA_HOST", "").strip()
     dev_model   = env.get("DEV_MODEL", "").strip()
+    timeout     = int(env.get("AIDER_TIMEOUT", "300"))
 
-    print(f"  Files:  {', '.join(files)}")
-    print(f"  Model:  ollama/{dev_model}")
-    print(f"  Aider:  {aider_path}")
+    print(f"  Files:   {', '.join(files)}")
+    print(f"  Model:   ollama/{dev_model}")
+    print(f"  Aider:   {aider_path}")
+    print(f"  Timeout: {timeout}s")
 
     cmd = [
         aider_path,
-        "--model",          f"ollama/{dev_model}",
+        "--model",           f"ollama/{dev_model}",
         "--openai-api-base", f"{ollama_host}/v1",
-        "--message",        message,
+        "--message",         message,
         "--yes",
         "--no-auto-commits",
         "--no-pretty",
         "--no-suggest-shell-commands",
         "--no-check-update",
-        "--map-tokens",     "1024",
+        "--map-tokens",      "1024",
     ]
 
-    # developer manifest as read-only context
     dev_manifest = Path("manifests/Developer.md")
     if dev_manifest.exists():
         cmd += ["--read", str(dev_manifest)]
 
     cmd += files
 
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        timeout=300,
-        env=env
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  [ERROR] aider timed out on {ticket['number']} after {timeout}s")
+        print(f"  Tip: increase AIDER_TIMEOUT in .env (currently {timeout}s)")
+        return False
 
-    # always print aider output so failures are visible
     if result.stdout:
         print(f"  aider stdout:\n{result.stdout[-1000:]}")
     if result.stderr:
@@ -148,8 +197,12 @@ def _run_aider(ticket: dict, project_context: str, env: dict, cwd: str) -> bool:
 
 
 def _commit_ticket(ticket: dict, env: dict, cwd: str) -> bool:
-    """Stage all changes and commit. Returns False if nothing to commit."""
-    subprocess.run(["git", "add", "-A"], cwd=cwd, env=env)
+    """Stage ticket files explicitly and commit. Returns False if nothing to commit."""
+    files_to_stage = [f for f in ticket["files"] if (Path(cwd) / f).exists()]
+    if files_to_stage:
+        subprocess.run(["git", "add", "--"] + files_to_stage, cwd=cwd, env=env)
+    else:
+        subprocess.run(["git", "add", "-A"], cwd=cwd, env=env)
 
     status = subprocess.run(
         ["git", "diff", "--cached", "--stat"],
@@ -170,25 +223,48 @@ def _commit_ticket(ticket: dict, env: dict, cwd: str) -> bool:
 # Public interface
 # ─────────────────────────────────────────────────────────────
 
-def run_developer_crew(tickets_path: str, context_path: str):
+def run_developer_crew(tickets_path: str, context_path: str, target_repo: str):
     """
     Parse tickets, run aider once per ticket, commit each.
     No LLM — pure deterministic orchestration.
+    Skips tickets already committed on the current branch since diverging
+    from main — resume safe without polluting skip list from previous runs.
     Stops on first failure — later tickets depend on earlier ones.
-    """
-    env             = os.environ.copy()
-    env.update(dotenv_values(".env"))
-    cwd             = str(Path.cwd())
-    project_context = Path(context_path).read_text() if Path(context_path).exists() else ""
-    tickets         = _parse_tickets(tickets_path)
 
+    Args:
+        tickets_path: path to tickets.md (inside run_dir)
+        context_path: path to project_context.md (inside workspace/context/)
+        target_repo:  path to Repo B — all git ops and aider run here
+    """
+    env = os.environ.copy()
+    env.update(dotenv_values(".env"))
+    cwd = str(target_repo)
+
+    try:
+        project_context = Path(context_path).read_text() if Path(context_path).exists() else ""
+    except Exception as e:
+        print(f"[Developer] WARN — could not read project context: {e}")
+        project_context = ""
+
+    tickets = _parse_tickets(tickets_path)
     if not tickets:
         print("[Developer] No tickets found — check ticket format in tickets.md")
         return
 
-    print(f"[Developer] {len(tickets)} ticket(s) to implement")
+    # scope skip check to this branch only — not full repo history
+    already_committed = _committed_tickets_on_branch(cwd, env)
+    if already_committed:
+        print(f"[Developer] Already committed on this branch: {sorted(already_committed)} — skipping")
 
-    # switch to agent git identity
+    pending = [t for t in tickets if t["number"] not in already_committed]
+
+    if not pending:
+        print("[Developer] All tickets already committed on this branch — nothing to do")
+        return
+
+    print(f"[Developer] {len(tickets)} total ticket(s), {len(pending)} pending")
+    print(f"[Developer] Working in: {cwd}")
+
     human_name  = env.get("GIT_USER_NAME", "")
     human_email = env.get("GIT_USER_EMAIL", "")
     agent_name  = env.get("AGENT_NAME",  "agenticScheduler[bot]")
@@ -200,15 +276,16 @@ def run_developer_crew(tickets_path: str, context_path: str):
     completed = []
 
     try:
-        for i, ticket in enumerate(tickets, 1):
-            print(f"\n[Developer] [{i}/{len(tickets)}] {ticket['number']}: {ticket['title']}")
+        for i, ticket in enumerate(pending, 1):
+            print(f"\n[Developer] [{i}/{len(pending)}] {ticket['number']}: {ticket['title']}")
 
             success = _run_aider(ticket, project_context, env, cwd)
             if not success:
                 raise RuntimeError(
                     f"Aider failed on {ticket['number']}. "
-                    f"Completed: {[t['number'] for t in completed]}. "
-                    "Fix and reset developer stage to pending."
+                    f"Completed this run: {[t['number'] for t in completed]}. "
+                    f"Already committed on branch: {sorted(already_committed)}. "
+                    "Fix and reset developer stage to pending to retry."
                 )
 
             committed = _commit_ticket(ticket, env, cwd)
@@ -219,13 +296,12 @@ def run_developer_crew(tickets_path: str, context_path: str):
                 )
 
             completed.append(ticket)
-            if i < len(tickets):
+            if i < len(pending):
                 time.sleep(1)
 
-        print(f"\n[Developer] All {len(tickets)} tickets implemented")
+        print(f"\n[Developer] All {len(pending)} pending ticket(s) implemented")
 
     finally:
-        # always restore human git identity
         if human_name:
             subprocess.run(["git", "config", "user.name",  human_name],  cwd=cwd, env=env)
         if human_email:

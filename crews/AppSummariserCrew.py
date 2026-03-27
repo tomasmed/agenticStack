@@ -3,21 +3,24 @@ from pathlib import Path
 import os
 
 
-def build_app_summariser_crew() -> Crew:
+def build_app_summariser_crew(target_repo: Path) -> Crew:
     llm = LLM(
         model=f"ollama/{os.getenv('APP_SUMMARISER_MODEL', '').strip()}",
         base_url=os.getenv("OLLAMA_HOST", "").strip()
     )
     manifest = Path("manifests/AppSummariser.md").read_text()
 
-    # read frontend file tree — no LLM tool needed, just list what exists
-    frontend = Path("frontend")
-    file_list = "\n".join(
-        str(p) for p in sorted(frontend.rglob("*"))
-        if p.is_file()
-        and not any(s in p.parts for s in ("node_modules", ".next", "dist"))
-        and p.suffix in (".tsx", ".ts", ".jsx", ".js", ".css")
-    ) if frontend.exists() else "No frontend directory found."
+    frontend = target_repo / "frontend"
+    if not frontend.exists():
+        file_list = "No frontend directory found."
+        print(f"[AppSummariserCrew] WARN — frontend directory not found at {frontend}")
+    else:
+        file_list = "\n".join(
+            str(p.relative_to(target_repo)) for p in sorted(frontend.rglob("*"))
+            if p.is_file()
+            and not any(s in p.parts for s in ("node_modules", ".next", "dist"))
+            and p.suffix in (".tsx", ".ts", ".jsx", ".js", ".css")
+        ) or "Frontend directory exists but contains no source files."
 
     agent = Agent(
         role="App Summariser",
