@@ -23,7 +23,6 @@ from pathlib import Path
 import shutil
 from dotenv import dotenv_values
 
-
 # ─────────────────────────────────────────────────────────────
 # Aider path resolution
 # ─────────────────────────────────────────────────────────────
@@ -60,17 +59,19 @@ def _parse_tickets(tickets_path: str) -> list[dict]:
     for block in blocks:
         number = re.search(r'(T-\d+)', block)
         title  = re.search(r'\*\*title:\*\*\s*(.+)', block)
-        files  = re.search(r'\*\*files:\*\*\s*(.+)', block)
+        f_edit = re.search(r'\*\*files_editable:\*\*\s*(.+)', block)
+        f_read = re.search(r'\*\*files_readonly:\*\*\s*(.+)', block)
         desc   = re.search(r'\*\*description:\*\*\s*(.*?)(?=\*\*acceptance:|$)', block, re.DOTALL)
         accept = re.search(r'\*\*acceptance:\*\*\s*(.*?)(?=---|\*\*ticket:|$)', block, re.DOTALL)
 
-        if not (number and title and files):
+        if not (number and title and f_edit):
             continue
 
         tickets.append({
             "number":      number.group(1),
             "title":       title.group(1).strip(),
-            "files":       [f.strip().strip('`') for f in files.group(1).split(",") if f.strip()],
+            "files_editable": [f.strip().strip('`') for f in f_edit.group(1).split(",") if f.strip()],
+            "files_readonly": [f.strip().strip('`') for f in f_read.group(1).split(",") if f.strip()] if f_read else [],
             "description": desc.group(1).strip() if desc else "",
             "acceptance":  accept.group(1).strip() if accept else "",
         })
@@ -140,9 +141,11 @@ DONE WHEN:
 def _run_aider(ticket: dict, project_context: str, env: dict, cwd: str) -> bool:
     aider_path = _get_aider_path()
     message    = _build_message(ticket, project_context)
-    files      = ticket["files"]
+    
+    editable_files = ticket["files_editable"]
+    readonly_files = ticket["files_readonly"]
 
-    if not files:
+    if not editable_files and not readonly_files:
         print(f"  [WARN] No files in {ticket['number']} — skipping")
         return False
 
@@ -150,10 +153,17 @@ def _run_aider(ticket: dict, project_context: str, env: dict, cwd: str) -> bool:
     dev_model   = env.get("DEV_MODEL", "").strip()
     timeout     = int(env.get("AIDER_TIMEOUT", "300"))
 
-    print(f"  Files:   {', '.join(files)}")
+    print(f"  Target (Edit): {', '.join(editable_files) or 'None'}")
+    if readonly_files:
+        print(f"  Context (Read): {', '.join(readonly_files)}")
     print(f"  Model:   ollama/{dev_model}")
     print(f"  Aider:   {aider_path}")
     print(f"  Timeout: {timeout}s")
+
+    if not editable_files:
+        print(f"  [INFO] Ticket {ticket['number']} contains only binary assets. "
+              "Skipping aider call; assets are assumed to be placed by Artist.")
+        return True
 
     cmd = [
         aider_path,
@@ -172,7 +182,12 @@ def _run_aider(ticket: dict, project_context: str, env: dict, cwd: str) -> bool:
     if dev_manifest.exists():
         cmd += ["--read", str(dev_manifest)]
 
-    cmd += files
+    # Pass files marked as readonly by the Team Lead using the --read flag
+    for f in readonly_files:
+        if (Path(cwd) / f).exists():
+            cmd += ["--read", f]
+
+    cmd += editable_files
 
     try:
         result = subprocess.run(
@@ -198,7 +213,9 @@ def _run_aider(ticket: dict, project_context: str, env: dict, cwd: str) -> bool:
 
 def _commit_ticket(ticket: dict, env: dict, cwd: str) -> bool:
     """Stage ticket files explicitly and commit. Returns False if nothing to commit."""
-    files_to_stage = [f for f in ticket["files"] if (Path(cwd) / f).exists()]
+    # We only stage files that were meant to be edited
+    files_to_stage = [f for f in ticket["files_editable"] if (Path(cwd) / f).exists()]
+    
     if files_to_stage:
         subprocess.run(["git", "add", "--"] + files_to_stage, cwd=cwd, env=env)
     else:

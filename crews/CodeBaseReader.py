@@ -209,9 +209,9 @@ def _walk(node, code: bytes, r: dict):
         _walk(child, code, r)
 
 
-def _extract(path: Path) -> dict:
+def _extract(path: Path, target_repo: Path) -> dict:
     r = {
-        "file": str(path), "type": _classify(path),
+        "file": str(path.relative_to(target_repo)), "type": _classify(path),
         "exports": [], "local_imports": [], "hooks": [],
         "renders": [], "api_methods": [], "is_client": False
     }
@@ -391,7 +391,7 @@ def _write_flat_index(source_dir: str, target_repo: Path, run_dir: Path):
     index_out.parent.mkdir(parents=True, exist_ok=True)
 
     extractions = [
-        _extract(target_repo / f)
+        _extract(target_repo / f, target_repo)
         for f in sorted(_all_sources(source_dir, target_repo))
     ]
     lines = ["# Codebase Index (structural)", ""]
@@ -457,7 +457,7 @@ def run_codebase_reader(source_dir: str, target_repo: Path, run_dir: Path, force
             continue
         print(f"[CodebaseReader] Indexing: {file_path}")
         try:
-            extraction = _extract(abs_path)
+            extraction = _extract(abs_path, target_repo)
             updated.append(_write_sidecar(extraction, llm, target_repo, git_hash))
         except Exception as e:
             print(f"[CodebaseReader] ERROR indexing {file_path}: {e}")

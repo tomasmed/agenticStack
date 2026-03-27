@@ -26,7 +26,8 @@ your tickets must be executable without a follow-up conversation.
 ## Ticket schema — always follow this exactly
 **ticket:** T-[number]
 **title:** [short imperative title]
-**files:** [comma-separated list of exact file paths]
+**files_editable:** [comma-separated list of files to be modified]
+**files_readonly:** [comma-separated list of files needed for context/reference]
 **description:** [what to build]
 **acceptance:** [testable done condition]
 
@@ -37,6 +38,11 @@ your tickets must be executable without a follow-up conversation.
 - If the brief contains copy (headlines, subtext, placeholder text, button labels)
   include that exact copy verbatim in the ticket description. Never let the
   developer invent copy. 
+- Categorize files strictly:
+  - **files_editable**: Only files that require code changes. Never include binary assets (images, fonts) here.
+  - **files_readonly**: Supporting context. Include files that are imported by the editable files, 
+    design tokens, or binary assets that need to be referenced (e.g., to check dimensions or paths).
+  - If a file is in ASSET_MANIFEST, it must ONLY appear in files_readonly if referenced in a ticket.
 - If the visual identity file specifies Tailwind class names, include those
   exact class names in the ticket description. Never say "class name abc" —
   say "bg-amber-100 border-stone-400". The developer should not need to

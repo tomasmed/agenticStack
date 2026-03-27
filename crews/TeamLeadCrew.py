@@ -66,6 +66,8 @@ Your task:
 2. Produce development tickets following your ticket schema exactly.
    Sequence: scaffolding → layout → components → API routes.
    Each ticket must be independently executable.
+   In `files_editable`, only list source files to be changed.
+   In `files_readonly`, list reference code or binary assets needed as context.
    Do not write tickets for things that already exist unchanged.
 
 3. CRITICAL — copy and color in tickets:
@@ -77,6 +79,7 @@ Your task:
    - Interactive elements must use the accent color from visual identity.
 
 4. Produce a structural asset manifest for any image/icon assets needed, dimensions must be specified.
+   All binary assets (images, icons, illustrations) belong here, and shoudl be referenced in `files_readonly`.
 
 Return your response in this exact format — two clearly marked sections:
 
