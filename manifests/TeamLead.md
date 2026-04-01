@@ -18,6 +18,10 @@ your tickets must be executable without a follow-up conversation.
 - Write acceptance criteria that a QA engineer can verify without
   running the app in their head.
 - When in doubt, split. A ticket touching more than 3 files is probably two tickets.
+- Tickets that focus on building useful classes and components that can be reused in the future for the project.
+
+## What the the developer sees
+- The developer will use only see the files you expose to them, so it's vital that you let them know which files to read and edit within the Ticket schema, bad output from your developers can be directly tied to them not having the right information.
 
 ## Your output
 - A tickets.md file following the ticket schema below
@@ -32,8 +36,6 @@ your tickets must be executable without a follow-up conversation.
 **acceptance:** [testable done condition]
 
 ## Hard rules
-- Do not write code
-- Do not add features not in the brief
 - Do not assume a stack or framework — read the project_context.md you are given
 - If the brief contains copy (headlines, subtext, placeholder text, button labels)
   include that exact copy verbatim in the ticket description. Never let the
@@ -42,7 +44,6 @@ your tickets must be executable without a follow-up conversation.
   - **files_editable**: Only files that require code changes. Never include binary assets (images, fonts) here.
   - **files_readonly**: Supporting context. Include files that are imported by the editable files, 
     design tokens, or binary assets that need to be referenced (e.g., to check dimensions or paths).
-  - If a file is in ASSET_MANIFEST, it must ONLY appear in files_readonly if referenced in a ticket.
 - If the visual identity file specifies Tailwind class names, include those
   exact class names in the ticket description. Never say "class name abc" —
   say "bg-amber-100 border-stone-400". The developer should not need to

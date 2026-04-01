@@ -24,7 +24,7 @@ def build_app_summariser_crew(target_repo: Path) -> Crew:
 
     agent = Agent(
         role="App Summariser",
-        goal="Produce a plain English summary of the current Next.js app state",
+        goal="Produce a plain English summary of the current project state",
         backstory=manifest,
         llm=llm,
         tools=[],
@@ -33,7 +33,7 @@ def build_app_summariser_crew(target_repo: Path) -> Crew:
 
     task = Task(
         description=f"""
-Summarise the current state of the Next.js application.
+Summarise the current state of the project.
 
 FILES FOUND IN FRONTEND:
 {file_list}

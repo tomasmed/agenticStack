@@ -286,9 +286,6 @@ What this file makes available to the rest of the codebase.
 Hooks used, components rendered, local files imported.
 State explicitly if none detected.
 
-## What it does NOT do
-Important boundaries a developer or planning agent should know.
-
 ## Notes
 Anything else worth knowing when picking up this file cold.
 
